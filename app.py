@@ -2,6 +2,7 @@ import os
 import streamlit as st
 import google.generativeai as genai
 from dotenv import load_dotenv
+from prompting_techniques import TECHNIQUES
 
 from prompts import PROMPTS
 from utils import export_chat, get_word_count, get_session_start
@@ -77,6 +78,10 @@ with st.sidebar:
         "Choose Personality",
         list(PROMPTS.keys())
     )
+    technique = st.selectbox(
+    "🧠 Prompting Technique",
+    list(TECHNIQUES.keys())
+)
 
     model_name = st.selectbox(
         "Choose Gemini Model",
@@ -202,10 +207,15 @@ if prompt := st.chat_input("Type your message here..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Build system prompt
+
+
+        # Build system prompt based on selected personality
     system_prompt = PROMPTS[personality]
 
-    # Add document context if available
+    # Get selected prompting technique
+    technique_prompt = TECHNIQUES[technique]
+
+    # Add document context if a file has been uploaded
     document_context = ""
     if st.session_state.document_text:
         document_context = (
@@ -219,8 +229,11 @@ if prompt := st.chat_input("Type your message here..."):
         role = msg["role"].capitalize()
         history += f"{role}: {msg['content']}\n"
 
+    # Combine everything into one final prompt
     full_prompt = (
         system_prompt
+        + "\n\n"
+        + technique_prompt
         + document_context
         + "\n\nConversation History:\n"
         + history
@@ -231,22 +244,32 @@ if prompt := st.chat_input("Type your message here..."):
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
+                # Send prompt to Gemini
                 response = model.generate_content(full_prompt)
+
+                # Extract generated text
                 reply = response.text
 
+                # Display response
                 st.markdown(reply)
 
-                # Save assistant response
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": reply
-                })
+                # Save assistant response to chat history
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": reply
+                    }
+                )
 
             except Exception as e:
+                # Handle errors gracefully
                 error_message = f"Error: {str(e)}"
                 st.error(error_message)
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_message
-                })
+                # Save error to chat history
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": error_message
+                    }
+                )
