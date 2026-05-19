@@ -83,7 +83,10 @@ def create_user(username: str, email: str, password: str, full_name: str) -> dic
     Register a new user. Returns user dict on success, None if username/email exists.
     Password is hashed with bcrypt before storage.
     """
-    password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    try:
+        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    except Exception as e:
+        return None
 
     conn = get_connection()
     try:
@@ -94,6 +97,7 @@ def create_user(username: str, email: str, password: str, full_name: str) -> dic
         )
         conn.commit()
         user_id = cursor.lastrowid
+
         return {
             "id": user_id,
             "username": username.strip().lower(),
@@ -101,6 +105,9 @@ def create_user(username: str, email: str, password: str, full_name: str) -> dic
             "full_name": full_name.strip(),
         }
     except sqlite3.IntegrityError:
+        return None
+    except Exception:
+        conn.rollback()
         return None
     finally:
         conn.close()
