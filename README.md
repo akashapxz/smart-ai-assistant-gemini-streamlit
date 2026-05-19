@@ -1,6 +1,6 @@
 # 🤖 Smart AI Assistant — Gemini + Streamlit
 
-A full-featured, multi-domain AI assistant with authentication, persistent chat history, FAQ knowledge base, and a premium dark UI. Powered by **Google Gemini** and **Streamlit**.
+A full-featured, multi-domain AI assistant with authentication, persistent cloud-backed chat history, FAQ knowledge base, and a premium dark UI. Powered by **Google Gemini**, **Supabase**, and **Streamlit**.
 
 ---
 
@@ -33,10 +33,14 @@ A full-featured, multi-domain AI assistant with authentication, persistent chat 
 - "Ask AI" button to discuss any FAQ in chat
 
 ### 📜 Persistent Chat History
-- All chats saved to SQLite database
+- All chats saved to **Supabase (PostgreSQL)** — persists across deployments
 - Browse, search, filter, and re-open past conversations
-- Survives page refresh and re-login
+- Survives page refresh, re-login, and server restarts
 - Delete conversations you no longer need
+
+### ⚡ Smart Rate Limit Handling
+- Auto-retry with countdown timer on Gemini API rate limits
+- Graceful fallback with up to 3 retry attempts
 
 ### 🎨 Premium UI
 - Dark gradient theme with glassmorphism
@@ -50,20 +54,21 @@ A full-featured, multi-domain AI assistant with authentication, persistent chat 
 ```
 smart_ai_assistant/
 ├── app.py                    # Main app (auth gate + multi-page router)
-├── database.py               # SQLite database layer
+├── database.py               # Supabase (PostgreSQL) database layer
 ├── auth.py                   # Authentication (login/signup/sessions)
 ├── faqs.py                   # FAQ loader and search
 ├── prompts.py                # Personality & domain system prompts
 ├── prompting_techniques.py   # Prompt engineering techniques
 ├── utils.py                  # Utility functions
 ├── document_reader.py        # PDF/DOCX/TXT reader
+├── supabase_schema.sql       # PostgreSQL schema (run once in Supabase SQL Editor)
 ├── data/
 │   └── faq_dataset.csv       # FAQ dataset (40 entries, 4 domains)
 ├── .streamlit/
 │   ├── config.toml           # Streamlit theme configuration
 │   └── secrets.toml.example  # Template for Streamlit Cloud secrets
 ├── requirements.txt
-├── .env                      # Local API key (not committed)
+├── .env                      # Local env vars (not committed)
 ├── .gitignore
 └── README.md
 ```
@@ -90,14 +95,25 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
-### 4. Set up environment variables
+### 4. Set up Supabase (free)
+1. Go to [supabase.com](https://supabase.com) → Create a free account
+2. Create a **New Project** (pick a name, region, and database password)
+3. Once provisioned, go to **SQL Editor** → **New Query**
+4. Paste the contents of `supabase_schema.sql` and click **Run**
+5. Go to **Settings → API** and copy your **Project URL** and **`service_role` key**
+
+### 5. Set up environment variables
 Create a `.env` file in the project root:
 ```
-GEMINI_API_KEY=your_api_key_here
+GEMINI_API_KEY=your_gemini_api_key
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_KEY=your_service_role_key
 ```
-Get your API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
 
-### 5. Run the app
+- Get your Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
+- Get your Supabase credentials from the Supabase dashboard (Settings → API)
+
+### 6. Run the app
 ```bash
 streamlit run app.py
 ```
@@ -109,7 +125,7 @@ streamlit run app.py
 ### 1. Push to GitHub
 ```bash
 git add .
-git commit -m "Add authentication, chat history, FAQ system, and premium UI"
+git commit -m "Deploy with Supabase cloud database"
 git push origin main
 ```
 
@@ -119,13 +135,15 @@ git push origin main
 3. Connect your GitHub repo: `akashapxz/smart-ai-assistant-gemini-streamlit`
 4. Set **Main file path**: `app.py`
 5. Click **"Advanced settings"** → **Secrets**
-6. Add your secret:
-   ```
-   GEMINI_API_KEY = "your_actual_api_key_here"
+6. Add your secrets:
+   ```toml
+   GEMINI_API_KEY = "your_gemini_api_key"
+   SUPABASE_URL = "https://your-project-id.supabase.co"
+   SUPABASE_KEY = "your_service_role_key"
    ```
 7. Click **"Deploy"**
 
-> ⚠️ **Note**: Streamlit Cloud has an ephemeral filesystem. The SQLite database will reset on each app restart. For production use, consider upgrading to a cloud database like PostgreSQL or Supabase.
+> ✅ **Cloud-ready**: User data, chat history, and sessions are stored in Supabase (PostgreSQL) and persist across redeployments and server restarts.
 
 ---
 
@@ -135,6 +153,7 @@ git push origin main
 - API keys are loaded from environment variables (`.env` or `st.secrets`)
 - `.env`, `*.db`, and `secrets.toml` are in `.gitignore` — never committed
 - Session tokens expire after 30 days
+- Supabase uses the `service_role` key server-side with RLS policies
 
 ---
 
@@ -143,8 +162,8 @@ git push origin main
 | Component | Technology |
 |-----------|-----------|
 | Frontend  | Streamlit |
-| AI Model  | Google Gemini (Flash / Pro) |
-| Database  | SQLite |
+| AI Model  | Google Gemini 2.5 (Flash / Pro) |
+| Database  | Supabase (PostgreSQL) |
 | Auth      | bcrypt |
 | Styling   | Custom CSS (glassmorphism, gradients) |
 
