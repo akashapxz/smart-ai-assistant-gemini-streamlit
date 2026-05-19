@@ -1,79 +1,68 @@
 """
 Database layer for Smart AI Assistant.
-Uses SQLite for user authentication, chat history, and session management.
+Uses Supabase (PostgreSQL) for persistent cloud storage.
 """
 
-import sqlite3
 import os
-import hashlib
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import bcrypt
+from dotenv import load_dotenv
+from supabase import create_client, Client
 
-# Database file path (same directory as app)
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smart_assistant.db")
+# Load .env for local development
+load_dotenv()
+
+# ─── Supabase Client (Singleton) ───────────────────────────────────────────────
+
+_supabase_client: Client | None = None
 
 
-def get_connection():
-    """Get a SQLite connection with row_factory enabled."""
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+def _get_credentials():
+    """Get Supabase credentials from .env (local) or st.secrets (Streamlit Cloud)."""
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+
+    if not url or not key:
+        try:
+            import streamlit as st
+            url = url or st.secrets.get("SUPABASE_URL")
+            key = key or st.secrets.get("SUPABASE_KEY")
+        except Exception:
+            pass
+
+    return url, key
+
+
+def get_supabase_client() -> Client:
+    """Get or create the Supabase client singleton."""
+    global _supabase_client
+    if _supabase_client is None:
+        url, key = _get_credentials()
+        if not url or not key:
+            raise RuntimeError(
+                "Supabase not configured. Set SUPABASE_URL and SUPABASE_KEY "
+                "in .env (local) or Streamlit Secrets (cloud)."
+            )
+        _supabase_client = create_client(url, key)
+    return _supabase_client
+
+
+def _now_iso() -> str:
+    """Current UTC time as ISO string."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def init_db():
-    """Create all tables if they don't exist."""
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            full_name TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS session_tokens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            token TEXT UNIQUE NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title TEXT NOT NULL DEFAULT 'New Chat',
-            domain TEXT NOT NULL DEFAULT 'General',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id INTEGER NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
-        CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
-        CREATE INDEX IF NOT EXISTS idx_session_tokens_token ON session_tokens(token);
-    """)
-
-    conn.commit()
-    conn.close()
+    """Verify Supabase connection. Tables must be created via Supabase SQL Editor."""
+    try:
+        client = get_supabase_client()
+        client.table("users").select("id").limit(1).execute()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        print(f"[DB] Supabase connection note: {e}")
 
 
 # ─── User Management ───────────────────────────────────────────────────────────
@@ -85,279 +74,302 @@ def create_user(username: str, email: str, password: str, full_name: str) -> dic
     """
     try:
         password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    except Exception as e:
+    except Exception:
         return None
 
-    conn = get_connection()
     try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO users (username, email, password_hash, full_name) VALUES (?, ?, ?, ?)",
-            (username.strip().lower(), email.strip().lower(), password_hash, full_name.strip()),
-        )
-        conn.commit()
-        user_id = cursor.lastrowid
-
-        return {
-            "id": user_id,
+        supabase = get_supabase_client()
+        result = supabase.table("users").insert({
             "username": username.strip().lower(),
             "email": email.strip().lower(),
+            "password_hash": password_hash,
             "full_name": full_name.strip(),
-        }
-    except sqlite3.IntegrityError:
+        }).execute()
+
+        if result.data:
+            row = result.data[0]
+            return {
+                "id": row["id"],
+                "username": row["username"],
+                "email": row["email"],
+                "full_name": row["full_name"],
+            }
         return None
-    except Exception:
-        conn.rollback()
+    except Exception as e:
+        # PostgreSQL unique constraint violation = code 23505
+        if "23505" in str(e) or "duplicate" in str(e).lower():
+            return None
+        print(f"[DB ERROR] create_user: {e}")
         return None
-    finally:
-        conn.close()
 
 
 def authenticate_user(username: str, password: str) -> dict | None:
-    """
-    Verify credentials. Returns user dict on success, None on failure.
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, username, email, password_hash, full_name FROM users WHERE username = ?",
-        (username.strip().lower(),),
-    )
-    row = cursor.fetchone()
-    conn.close()
+    """Verify credentials. Returns user dict on success, None on failure."""
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("users").select(
+            "id, username, email, password_hash, full_name"
+        ).eq("username", username.strip().lower()).execute()
 
-    if row and bcrypt.checkpw(password.encode("utf-8"), row["password_hash"].encode("utf-8")):
-        return {
-            "id": row["id"],
-            "username": row["username"],
-            "email": row["email"],
-            "full_name": row["full_name"],
-        }
-    return None
+        if result.data:
+            row = result.data[0]
+            if bcrypt.checkpw(password.encode("utf-8"), row["password_hash"].encode("utf-8")):
+                return {
+                    "id": row["id"],
+                    "username": row["username"],
+                    "email": row["email"],
+                    "full_name": row["full_name"],
+                }
+        return None
+    except Exception as e:
+        print(f"[DB ERROR] authenticate_user: {e}")
+        return None
 
 
 def get_user_by_id(user_id: int) -> dict | None:
     """Fetch user by ID."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, username, email, full_name FROM users WHERE id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return dict(row)
-    return None
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("users").select(
+            "id, username, email, full_name"
+        ).eq("id", user_id).execute()
+
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        print(f"[DB ERROR] get_user_by_id: {e}")
+        return None
 
 
 # ─── Session Token Management (Remember Me) ────────────────────────────────────
 
 def create_session_token(user_id: int, days: int = 30) -> str:
-    """
-    Generate a secure session token for 'Remember Me' functionality.
-    Token is valid for `days` days. Returns the token string.
-    """
+    """Generate a secure session token for 'Remember Me'. Valid for `days` days."""
     token = secrets.token_urlsafe(64)
-    expires_at = datetime.utcnow() + timedelta(days=days)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=days)
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    # Clean up any existing tokens for this user (limit to 5 active sessions)
-    cursor.execute(
-        "DELETE FROM session_tokens WHERE user_id = ? AND token NOT IN "
-        "(SELECT token FROM session_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 4)",
-        (user_id, user_id),
-    )
-    cursor.execute(
-        "INSERT INTO session_tokens (user_id, token, expires_at) VALUES (?, ?, ?)",
-        (user_id, token, expires_at.isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        supabase = get_supabase_client()
+
+        # Clean up old tokens — keep max 4 active sessions
+        existing = supabase.table("session_tokens").select("id").eq(
+            "user_id", user_id
+        ).order("created_at", desc=True).execute()
+
+        if existing.data and len(existing.data) >= 4:
+            ids_to_delete = [r["id"] for r in existing.data[4:]]
+            if ids_to_delete:
+                supabase.table("session_tokens").delete().in_(
+                    "id", ids_to_delete
+                ).execute()
+
+        # Insert new token
+        supabase.table("session_tokens").insert({
+            "user_id": user_id,
+            "token": token,
+            "expires_at": expires_at.isoformat(),
+        }).execute()
+    except Exception as e:
+        print(f"[DB ERROR] create_session_token: {e}")
+
     return token
 
 
 def validate_session_token(token: str) -> dict | None:
-    """
-    Validate a session token. Returns user dict if valid and not expired, else None.
-    Expired tokens are cleaned up automatically.
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
+    """Validate a session token. Returns user dict if valid and not expired, else None."""
+    try:
+        supabase = get_supabase_client()
 
-    # Clean expired tokens
-    cursor.execute("DELETE FROM session_tokens WHERE expires_at < ?", (datetime.utcnow().isoformat(),))
-    conn.commit()
+        # Clean expired tokens
+        supabase.table("session_tokens").delete().lt(
+            "expires_at", _now_iso()
+        ).execute()
 
-    cursor.execute(
-        """SELECT u.id, u.username, u.email, u.full_name
-           FROM session_tokens st
-           JOIN users u ON st.user_id = u.id
-           WHERE st.token = ? AND st.expires_at > ?""",
-        (token, datetime.utcnow().isoformat()),
-    )
-    row = cursor.fetchone()
-    conn.close()
+        # Fetch token with joined user data
+        result = supabase.table("session_tokens").select(
+            "token, expires_at, users(id, username, email, full_name)"
+        ).eq("token", token).gt("expires_at", _now_iso()).execute()
 
-    if row:
-        return dict(row)
-    return None
+        if result.data:
+            user_data = result.data[0].get("users")
+            if user_data:
+                return user_data
+        return None
+    except Exception as e:
+        print(f"[DB ERROR] validate_session_token: {e}")
+        return None
 
 
 def delete_session_token(token: str):
     """Remove a session token (logout)."""
-    conn = get_connection()
-    conn.execute("DELETE FROM session_tokens WHERE token = ?", (token,))
-    conn.commit()
-    conn.close()
+    try:
+        supabase = get_supabase_client()
+        supabase.table("session_tokens").delete().eq("token", token).execute()
+    except Exception as e:
+        print(f"[DB ERROR] delete_session_token: {e}")
 
 
 def delete_all_user_tokens(user_id: int):
     """Remove all session tokens for a user (logout everywhere)."""
-    conn = get_connection()
-    conn.execute("DELETE FROM session_tokens WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        supabase = get_supabase_client()
+        supabase.table("session_tokens").delete().eq("user_id", user_id).execute()
+    except Exception as e:
+        print(f"[DB ERROR] delete_all_user_tokens: {e}")
 
 
 # ─── Conversation Management ───────────────────────────────────────────────────
 
 def create_conversation(user_id: int, title: str = "New Chat", domain: str = "General") -> int:
     """Create a new conversation. Returns the conversation ID."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO conversations (user_id, title, domain) VALUES (?, ?, ?)",
-        (user_id, title, domain),
-    )
-    conn.commit()
-    conv_id = cursor.lastrowid
-    conn.close()
-    return conv_id
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("conversations").insert({
+            "user_id": user_id,
+            "title": title,
+            "domain": domain,
+        }).execute()
+
+        if result.data:
+            return result.data[0]["id"]
+        return None
+    except Exception as e:
+        print(f"[DB ERROR] create_conversation: {e}")
+        return None
 
 
 def get_conversations(user_id: int, domain: str = None, search: str = None) -> list[dict]:
-    """
-    Get all conversations for a user, ordered by most recent.
-    Optionally filter by domain or search term.
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
+    """Get all conversations for a user, ordered by most recent."""
+    try:
+        supabase = get_supabase_client()
+        query = supabase.table("conversations").select("*").eq("user_id", user_id)
 
-    query = "SELECT * FROM conversations WHERE user_id = ?"
-    params = [user_id]
+        if domain and domain != "All":
+            query = query.eq("domain", domain)
+        if search:
+            query = query.ilike("title", f"%{search}%")
 
-    if domain and domain != "All":
-        query += " AND domain = ?"
-        params.append(domain)
-
-    if search:
-        query += " AND title LIKE ?"
-        params.append(f"%{search}%")
-
-    query += " ORDER BY updated_at DESC"
-
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+        result = query.order("updated_at", desc=True).execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[DB ERROR] get_conversations: {e}")
+        return []
 
 
 def get_conversation(conversation_id: int) -> dict | None:
     """Get a single conversation by ID."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return dict(row)
-    return None
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("conversations").select("*").eq(
+            "id", conversation_id
+        ).execute()
+
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        print(f"[DB ERROR] get_conversation: {e}")
+        return None
 
 
 def update_conversation_title(conversation_id: int, title: str):
     """Update the title of a conversation."""
-    conn = get_connection()
-    conn.execute(
-        "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-        (title, datetime.utcnow().isoformat(), conversation_id),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        supabase = get_supabase_client()
+        supabase.table("conversations").update({
+            "title": title,
+            "updated_at": _now_iso(),
+        }).eq("id", conversation_id).execute()
+    except Exception as e:
+        print(f"[DB ERROR] update_conversation_title: {e}")
 
 
 def update_conversation_timestamp(conversation_id: int):
     """Touch the updated_at timestamp."""
-    conn = get_connection()
-    conn.execute(
-        "UPDATE conversations SET updated_at = ? WHERE id = ?",
-        (datetime.utcnow().isoformat(), conversation_id),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        supabase = get_supabase_client()
+        supabase.table("conversations").update({
+            "updated_at": _now_iso(),
+        }).eq("id", conversation_id).execute()
+    except Exception as e:
+        print(f"[DB ERROR] update_conversation_timestamp: {e}")
 
 
 def delete_conversation(conversation_id: int):
     """Delete a conversation and all its messages (CASCADE)."""
-    conn = get_connection()
-    conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
-    conn.commit()
-    conn.close()
+    try:
+        supabase = get_supabase_client()
+        supabase.table("conversations").delete().eq(
+            "id", conversation_id
+        ).execute()
+    except Exception as e:
+        print(f"[DB ERROR] delete_conversation: {e}")
 
 
 # ─── Message Management ────────────────────────────────────────────────────────
 
 def save_message(conversation_id: int, role: str, content: str) -> int:
     """Save a message to a conversation. Returns message ID."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
-        (conversation_id, role, content),
-    )
-    # Also update the conversation's updated_at
-    cursor.execute(
-        "UPDATE conversations SET updated_at = ? WHERE id = ?",
-        (datetime.utcnow().isoformat(), conversation_id),
-    )
-    conn.commit()
-    msg_id = cursor.lastrowid
-    conn.close()
-    return msg_id
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("messages").insert({
+            "conversation_id": conversation_id,
+            "role": role,
+            "content": content,
+        }).execute()
+
+        # Also update the conversation's updated_at
+        supabase.table("conversations").update({
+            "updated_at": _now_iso(),
+        }).eq("id", conversation_id).execute()
+
+        if result.data:
+            return result.data[0]["id"]
+        return None
+    except Exception as e:
+        print(f"[DB ERROR] save_message: {e}")
+        return None
 
 
 def get_messages(conversation_id: int) -> list[dict]:
     """Get all messages for a conversation, ordered chronologically."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
-        (conversation_id,),
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("messages").select("*").eq(
+            "conversation_id", conversation_id
+        ).order("created_at").execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[DB ERROR] get_messages: {e}")
+        return []
 
 
 def get_conversation_preview(conversation_id: int, max_length: int = 100) -> str:
     """Get a preview of the first user message in a conversation."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY created_at ASC LIMIT 1",
-        (conversation_id,),
-    )
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        text = row["content"]
-        return text[:max_length] + "..." if len(text) > max_length else text
-    return "Empty conversation"
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("messages").select("content").eq(
+            "conversation_id", conversation_id
+        ).eq("role", "user").order("created_at").limit(1).execute()
+
+        if result.data:
+            text = result.data[0]["content"]
+            return text[:max_length] + "..." if len(text) > max_length else text
+        return "Empty conversation"
+    except Exception as e:
+        print(f"[DB ERROR] get_conversation_preview: {e}")
+        return "Empty conversation"
 
 
 def get_message_count(conversation_id: int) -> int:
     """Get the number of messages in a conversation."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) as count FROM messages WHERE conversation_id = ?", (conversation_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row["count"] if row else 0
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("messages").select(
+            "id", count="exact"
+        ).eq("conversation_id", conversation_id).execute()
+        return result.count or 0
+    except Exception as e:
+        print(f"[DB ERROR] get_message_count: {e}")
+        return 0
