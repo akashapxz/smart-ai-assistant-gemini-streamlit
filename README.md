@@ -1,6 +1,6 @@
-# 🤖 Smart AI Assistant — Gemini + Streamlit
+# 🤖 Smart AI Assistant — Gemini + Groq + Streamlit
 
-A full-featured, multi-domain AI assistant with authentication, persistent cloud-backed chat history, FAQ knowledge base, and a premium dark UI. Powered by **Google Gemini**, **Supabase**, and **Streamlit**.
+A full-featured, multi-domain AI assistant with authentication, persistent cloud-backed chat history, FAQ knowledge base, and a premium dark UI. Powered by **Google Gemini**, **Groq (Llama 3.3)**, **Supabase**, and **Streamlit**.
 
 ---
 
@@ -18,14 +18,21 @@ A full-featured, multi-domain AI assistant with authentication, persistent cloud
 - **🛒 Customer Support Assistant** — orders, returns, shipping, payments
 - **📦 Product Assistance Assistant** — setup, troubleshooting, specs
 
+### 🔌 Dual AI Provider Support
+- **Google Gemini** — Gemini 2.0 Flash, 2.5 Flash, 2.5 Pro
+- **Groq** — Llama 3.3 70B Versatile (ultra-fast inference)
+- Switch between providers seamlessly via sidebar dropdown
+- Helps avoid rate limits by using an alternative provider
+
 ### 🧠 Prompt Engineering
 - Zero-Shot, One-Shot, Few-Shot Prompting
 - Chain-of-Thought, Role-Based, Structured Output
 - Multiple personality modes
 
 ### 📄 Document Q&A
-- Upload PDF, DOCX, and TXT files
+- Upload PDF, DOCX, and TXT files via 📎 attachment button (near chat input)
 - Ask questions about uploaded content
+- Clean, modern attachment UI similar to ChatGPT/Claude
 
 ### ❓ FAQ Knowledge Base
 - 40 realistic FAQs across 4 domains
@@ -41,11 +48,13 @@ A full-featured, multi-domain AI assistant with authentication, persistent cloud
 ### ⚡ Smart Rate Limit Handling
 - Auto-retry with countdown timer on Gemini API rate limits
 - Graceful fallback with up to 3 retry attempts
+- Switch to Groq when Gemini limits are hit
 
 ### 🎨 Premium UI
 - Dark gradient theme with glassmorphism
 - Inter font, smooth animations, custom scrollbars
 - Domain-specific color coding
+- Clean sidebar with quick-access New Chat button
 
 ---
 
@@ -108,10 +117,14 @@ Create a `.env` file in the project root:
 GEMINI_API_KEY=your_gemini_api_key
 SUPABASE_URL=https://your-project-id.supabase.co
 SUPABASE_KEY=your_service_role_key
+GROQ_API_KEY=your_groq_api_key
 ```
 
 - Get your Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
+- Get your Groq API key from [Groq Console](https://console.groq.com/keys) (free tier available)
 - Get your Supabase credentials from the Supabase dashboard (Settings → API)
+
+> **Note:** At least one of `GEMINI_API_KEY` or `GROQ_API_KEY` is required. Both are recommended for the best experience.
 
 ### 6. Run the app
 ```bash
@@ -125,7 +138,7 @@ streamlit run app.py
 ### 1. Push to GitHub
 ```bash
 git add .
-git commit -m "Deploy with Supabase cloud database"
+git commit -m "Deploy with Groq + Gemini dual provider support"
 git push origin main
 ```
 
@@ -140,6 +153,7 @@ git push origin main
    GEMINI_API_KEY = "your_gemini_api_key"
    SUPABASE_URL = "https://your-project-id.supabase.co"
    SUPABASE_KEY = "your_service_role_key"
+   GROQ_API_KEY = "your_groq_api_key"
    ```
 7. Click **"Deploy"**
 
@@ -162,7 +176,7 @@ git push origin main
 | Component | Technology |
 |-----------|-----------|
 | Frontend  | Streamlit |
-| AI Model  | Google Gemini 2.5 (Flash / Pro) |
+| AI Models | Google Gemini 2.5 (Flash / Pro), Groq Llama 3.3 70B |
 | Database  | Supabase (PostgreSQL) |
 | Auth      | bcrypt |
 | Styling   | Custom CSS (glassmorphism, gradients) |

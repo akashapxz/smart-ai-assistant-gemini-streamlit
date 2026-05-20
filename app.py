@@ -5,8 +5,11 @@ Powered by Google Gemini + Streamlit.
 """
 
 import os
+import time
+from collections import deque
 import streamlit as st
 import google.generativeai as genai
+from openai import OpenAI
 from dotenv import load_dotenv
 
 from database import init_db, create_conversation, save_message, get_conversations, get_messages, delete_conversation, update_conversation_title, get_conversation, get_message_count
@@ -28,6 +31,13 @@ if not api_key:
         api_key = st.secrets.get("GEMINI_API_KEY")
     except Exception:
         api_key = None
+
+groq_api_key = os.getenv("GROQ_API_KEY")
+if not groq_api_key:
+    try:
+        groq_api_key = st.secrets.get("GROQ_API_KEY")
+    except Exception:
+        groq_api_key = None
 
 # ----------------------------
 # Page configuration (MUST be first Streamlit command)
@@ -57,6 +67,7 @@ defaults = {
     "current_domain": "General",
     "current_conversation_id": None,
     "doc_processed_name": None,
+    "api_request_times": deque(maxlen=5),
 }
 for key, val in defaults.items():
     if key not in st.session_state:
@@ -317,11 +328,12 @@ def inject_global_css():
 # ----------------------------
 inject_global_css()
 
-if not api_key:
-    st.error("⚠️ GEMINI_API_KEY not found in .env file. Please add your API key.")
+if not api_key and not groq_api_key:
+    st.error("⚠️ No API keys found. Add GEMINI_API_KEY or GROQ_API_KEY to your .env file.")
     st.stop()
 
-genai.configure(api_key=api_key)
+if api_key:
+    genai.configure(api_key=api_key)
 
 # Check persistent session (remember me)
 check_persistent_session()
@@ -372,6 +384,17 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # ➕ New Chat — always visible, right below navigation
+    if st.button("➕ New Chat", key="new_chat_btn", use_container_width=True):
+        st.session_state.current_conversation_id = None
+        st.session_state.messages = []
+        st.session_state.document_text = ""
+        st.session_state.doc_processed_name = None
+        st.session_state.current_page = "chat"
+        st.rerun()
+
+    st.markdown("---")
+
     # Domain selector
     st.markdown("##### 🌐 Assistant Mode")
     domain_options = ["General"] + get_all_domains()
@@ -399,37 +422,28 @@ with st.sidebar:
         # Chat settings
         st.markdown("##### ⚙️ Chat Settings")
 
+        # AI Provider selector
+        provider_options = ["Gemini"]
+        if groq_api_key:
+            provider_options.append("Groq")
+        provider = st.selectbox("🔌 AI Provider", provider_options, key="provider_sel")
+
         personality = st.selectbox("Personality", list(PROMPTS.keys()), key="personality_sel")
         technique = st.selectbox("🧠 Prompting Technique", list(TECHNIQUES.keys()), key="technique_sel")
-        model_name = st.selectbox("Model", ["gemini-2.5-flash", "gemini-2.5-pro"], key="model_sel")
+
+        # Model options change based on provider
+        if provider == "Groq":
+            model_name = st.selectbox("Model", ["llama-3.3-70b-versatile"], key="groq_model_sel")
+        else:
+            model_name = st.selectbox("Model", ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"], key="model_sel")
+
         temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.1, key="temp_slider")
         max_tokens = st.slider("Max Tokens", 256, 4096, 1024, 256, key="token_slider")
 
         st.markdown("---")
 
-        # Document upload
-        st.markdown("##### 📄 Document Q&A")
-        uploaded_file = st.file_uploader("Upload PDF, DOCX, or TXT", type=["pdf", "docx", "txt"], key="doc_upload")
-        if uploaded_file:
-            if st.session_state.doc_processed_name != uploaded_file.name:
-                with st.spinner("Reading document..."):
-                    st.session_state.document_text = extract_text(uploaded_file)
-                    st.session_state.doc_processed_name = uploaded_file.name
-                st.success("✅ Document loaded!")
-            else:
-                st.success("📄 Document active")
-
-        st.markdown("---")
-
-        # Conversations
+        # Conversations list
         st.markdown("##### 💬 Conversations")
-        if st.button("➕ New Chat", key="new_chat_btn", use_container_width=True):
-            conv_id = create_conversation(user["id"], "New Chat", st.session_state.current_domain)
-            st.session_state.current_conversation_id = conv_id
-            st.session_state.messages = []
-            st.rerun()
-
-        # List recent conversations
         convos = get_conversations(user["id"])
         for conv in convos[:10]:
             is_active = conv["id"] == st.session_state.current_conversation_id
@@ -441,13 +455,6 @@ with st.sidebar:
                 st.session_state.messages = [{"role": m["role"], "content": m["content"]} for m in msgs]
                 st.session_state.current_domain = conv["domain"]
                 st.rerun()
-
-    st.markdown("---")
-
-    # Stats
-    st.markdown("##### 📊 Session Stats")
-    st.metric("Messages", len(st.session_state.messages))
-    st.metric("Words", get_word_count(st.session_state.messages))
 
     st.markdown("---")
 
@@ -478,8 +485,11 @@ def render_chat_page():
     domain = st.session_state.current_domain
     d_conf = get_domain_config(domain) if domain != "General" else {"icon": "💬", "color": "#818cf8", "label": "General Assistant"}
 
+    # Determine active provider name for subtitle
+    provider = st.session_state.get("provider_sel", "Gemini")
+
     st.markdown(f'<div class="main-title">{d_conf["icon"]} Smart AI Assistant</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="subtitle">{d_conf["label"]} Mode • Powered by Google Gemini</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="subtitle">{d_conf["label"]} Mode • Powered by {provider}</div>', unsafe_allow_html=True)
 
     # Show relevant FAQs as quick suggestions for domain modes
     if domain != "General":
@@ -490,21 +500,36 @@ def render_chat_page():
                 for i, faq in enumerate(faqs[:6]):
                     with cols[i % 2]:
                         if st.button(f"❓ {truncate_text(faq['question'], 50)}", key=f"faq_quick_{i}", use_container_width=True):
-                            # Set this question as the pending input
                             st.session_state["pending_faq_question"] = faq["question"]
                             st.rerun()
 
-    # Ensure a conversation exists and is valid
+    # Validate current conversation (could be stale after DB reset)
     if st.session_state.current_conversation_id:
-        # Verify the conversation still exists in the DB (could be stale after DB reset)
         existing = get_conversation(st.session_state.current_conversation_id)
         if not existing:
             st.session_state.current_conversation_id = None
             st.session_state.messages = []
 
-    if not st.session_state.current_conversation_id:
-        conv_id = create_conversation(user["id"], "New Chat", domain)
-        st.session_state.current_conversation_id = conv_id
+    # Document upload — compact row near the chat area (like modern LLMs)
+    doc_col1, doc_col2 = st.columns([1, 11])
+    with doc_col1:
+        with st.popover("📎"):
+            uploaded_file = st.file_uploader(
+                "Upload PDF, DOCX, or TXT",
+                type=["pdf", "docx", "txt"],
+                key="doc_upload",
+            )
+            if uploaded_file:
+                if st.session_state.doc_processed_name != uploaded_file.name:
+                    with st.spinner("Reading document..."):
+                        st.session_state.document_text = extract_text(uploaded_file)
+                        st.session_state.doc_processed_name = uploaded_file.name
+                    st.success("✅ Document loaded!")
+                else:
+                    st.success(f"📄 {uploaded_file.name} active")
+    with doc_col2:
+        if st.session_state.document_text:
+            st.caption(f"📄 **{st.session_state.doc_processed_name}** attached  ·  [clear](#)", help="Document is being used as context")
 
     # Display chat history
     for message in st.session_state.messages:
@@ -520,11 +545,17 @@ def render_chat_page():
         prompt = pending
 
     if prompt:
+        # Create conversation on first message (prevents duplicate "New Chat" entries)
+        if not st.session_state.current_conversation_id:
+            title = generate_chat_title(prompt)
+            conv_id = create_conversation(user["id"], title, domain)
+            st.session_state.current_conversation_id = conv_id
+
         # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt})
         save_message(st.session_state.current_conversation_id, "user", prompt)
 
-        # Auto-title conversation from first message
+        # Auto-title conversation from first message (if conversation existed before)
         if len([m for m in st.session_state.messages if m["role"] == "user"]) == 1:
             title = generate_chat_title(prompt)
             update_conversation_title(st.session_state.current_conversation_id, title)
@@ -532,10 +563,9 @@ def render_chat_page():
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Build prompt
+        # Build prompt context
         personality = st.session_state.get("personality_sel", "General Assistant")
         technique = st.session_state.get("technique_sel", "None")
-        model_name = st.session_state.get("model_sel", "gemini-2.5-flash")
         temp = st.session_state.get("temp_slider", 0.7)
         max_tok = st.session_state.get("token_slider", 1024)
 
@@ -573,23 +603,71 @@ def render_chat_page():
             + f"\nUser: {prompt}"
         )
 
-        # Generate response
-        generation_config = {"temperature": temp, "max_output_tokens": max_tok}
-        model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
-
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
+            # ── Proactive rate limiter (5 RPM free tier — Gemini only) ──
+            if provider == "Gemini":
+                req_times = st.session_state.api_request_times
+                now = time.time()
+                while req_times and now - req_times[0] > 60:
+                    req_times.popleft()
+                if len(req_times) >= 4:
+                    wait_until = req_times[0] + 62
+                    wait_secs = int(wait_until - now)
+                    if wait_secs > 0:
+                        countdown = st.empty()
+                        for remaining in range(wait_secs, 0, -1):
+                            countdown.info(f"⏳ Pacing requests to stay within free tier limits. Ready in {remaining}s...")
+                            time.sleep(1)
+                        countdown.empty()
+
+            # ── Generate with retry ──
+            reply = None
+            for attempt in range(3):
                 try:
-                    response = model.generate_content(full_prompt)
-                    reply = response.text
-                    st.markdown(reply)
-                    st.session_state.messages.append({"role": "assistant", "content": reply})
-                    save_message(st.session_state.current_conversation_id, "assistant", reply)
+                    with st.spinner("Thinking..." if attempt == 0 else f"Retrying ({attempt + 1}/3)..."):
+                        if provider == "Groq":
+                            # ── Groq API (OpenAI-compatible) ──
+                            groq_client = OpenAI(
+                                api_key=groq_api_key,
+                                base_url="https://api.groq.com/openai/v1",
+                            )
+                            groq_model = st.session_state.get("groq_model_sel", "llama-3.3-70b-versatile")
+                            messages = [{"role": "system", "content": system_prompt + "\n" + technique_prompt + faq_context + document_context}]
+                            for msg in st.session_state.messages[-20:]:
+                                messages.append({"role": msg["role"], "content": msg["content"]})
+                            completion = groq_client.chat.completions.create(
+                                model=groq_model,
+                                messages=messages,
+                                temperature=temp,
+                                max_tokens=max_tok,
+                            )
+                            reply = completion.choices[0].message.content
+                        else:
+                            # ── Gemini API ──
+                            model_name = st.session_state.get("model_sel", "gemini-2.5-flash")
+                            generation_config = {"temperature": temp, "max_output_tokens": max_tok}
+                            model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+                            response = model.generate_content(full_prompt)
+                            reply = response.text
+
+                    st.session_state.api_request_times.append(time.time())
+                    break
                 except Exception as e:
-                    error_msg = f"⚠️ Error: {str(e)}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                    save_message(st.session_state.current_conversation_id, "assistant", error_msg)
+                    if "429" in str(e) and attempt < 2:
+                        countdown = st.empty()
+                        for remaining in range(30, 0, -1):
+                            countdown.info(f"⏳ Rate limit hit. Retrying in {remaining}s...")
+                            time.sleep(1)
+                        countdown.empty()
+                    else:
+                        reply = f"⚠️ Error: {str(e)}"
+                        st.error(reply)
+                        break
+
+            if reply:
+                st.markdown(reply)
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+                save_message(st.session_state.current_conversation_id, "assistant", reply)
 
 
 def render_faq_page():
