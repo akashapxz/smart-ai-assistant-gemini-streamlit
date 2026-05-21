@@ -1,10 +1,12 @@
 """
 Authentication module for Smart AI Assistant.
-Handles login, signup, Google OAuth, session management, and cookie-based persistent sessions.
+Handles login, signup, Google Sign-In (popup-based), session management,
+and cookie-based persistent sessions.
 """
 
 import re
 import streamlit as st
+import streamlit.components.v1 as components
 from database import (
     create_user,
     authenticate_user,
@@ -49,26 +51,68 @@ def check_persistent_session():
     return False
 
 
-def check_google_oauth():
-    """Check if user authenticated via Google OAuth (st.login). Bridge to app session."""
+def check_google_credential():
+    """Check if a Google credential JWT was passed via query params (from popup sign-in)."""
     if st.session_state.get("authenticated"):
         return True
 
-    try:
-        if st.user.is_logged_in:
-            email = st.user.email
-            name = getattr(st.user, "name", "") or email.split("@")[0]
+    params = st.query_params
+    credential = params.get("google_credential", None)
 
-            # Find or create user in our database
+    if credential:
+        # Verify the Google ID token
+        user_info = _verify_google_token(credential)
+        if user_info:
+            email = user_info.get("email", "")
+            name = user_info.get("name", "") or email.split("@")[0]
+
             user = get_or_create_google_user(email, name)
             if user:
                 st.session_state.authenticated = True
                 st.session_state.user = user
                 st.session_state.auth_provider = "google"
+                st.query_params.clear()
                 return True
-    except Exception:
-        pass
+        # Clear invalid credential
+        st.query_params.clear()
     return False
+
+
+def _verify_google_token(token: str) -> dict | None:
+    """Verify a Google ID token and return user info."""
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+
+        # Get client_id from secrets
+        client_id = None
+        try:
+            client_id = st.secrets["auth"]["google"]["client_id"]
+        except Exception:
+            try:
+                client_id = st.secrets["auth"]["client_id"]
+            except Exception:
+                pass
+
+        if not client_id:
+            return None
+
+        idinfo = id_token.verify_oauth2_token(
+            token, google_requests.Request(), client_id
+        )
+
+        # Verify issuer
+        if idinfo["iss"] not in ["accounts.google.com", "https://accounts.google.com"]:
+            return None
+
+        return {
+            "email": idinfo.get("email", ""),
+            "name": idinfo.get("name", ""),
+            "picture": idinfo.get("picture", ""),
+        }
+    except Exception as e:
+        print(f"[AUTH] Google token verification failed: {e}")
+        return None
 
 
 def handle_login(username, password, remember_me):
@@ -116,13 +160,6 @@ def handle_logout():
     if token:
         delete_session_token(token)
 
-    # If user logged in via Google, also clear the OIDC cookie
-    if st.session_state.get("auth_provider") == "google":
-        try:
-            st.logout()
-        except Exception:
-            pass
-
     st.session_state.authenticated = False
     st.session_state.user = None
     st.session_state.session_token = None
@@ -140,8 +177,23 @@ def render_auth_page():
         _render_signup()
 
 
+def _get_google_client_id():
+    """Get Google OAuth client ID from secrets."""
+    try:
+        return st.secrets["auth"]["google"]["client_id"]
+    except Exception:
+        try:
+            return st.secrets["auth"]["client_id"]
+        except Exception:
+            return None
+
+
 def _render_google_button():
-    """Render a styled 'Continue with Google' button."""
+    """Render Google Sign-In using Google Identity Services (popup-based, no redirects)."""
+    client_id = _get_google_client_id()
+    if not client_id:
+        return
+
     st.markdown("""
     <div style="display:flex;align-items:center;justify-content:center;margin:0.5rem 0;">
         <div style="flex:1;height:1px;background:rgba(255,255,255,0.1);"></div>
@@ -150,7 +202,35 @@ def _render_google_button():
     </div>
     """, unsafe_allow_html=True)
 
-    st.button("🔵 Continue with Google", key="google_login_btn", use_container_width=True, on_click=st.login, args=["google"])
+    # Google Identity Services popup-based sign-in
+    # After sign-in, navigates to the app with the credential as a query param
+    google_signin_html = f"""
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script>
+    function handleCredentialResponse(response) {{
+        // Navigate parent page with the credential token
+        var baseUrl = window.parent.location.href.split('?')[0].split('#')[0];
+        window.parent.location.href = baseUrl + '?google_credential=' + encodeURIComponent(response.credential);
+    }}
+    </script>
+    <div id="g_id_onload"
+         data-client_id="{client_id}"
+         data-callback="handleCredentialResponse"
+         data-auto_prompt="false">
+    </div>
+    <div style="display:flex;justify-content:center;padding:8px 0;">
+        <div class="g_id_signin"
+             data-type="standard"
+             data-size="large"
+             data-theme="filled_blue"
+             data-text="continue_with"
+             data-shape="rectangular"
+             data-logo_alignment="left"
+             data-width="350">
+        </div>
+    </div>
+    """
+    components.html(google_signin_html, height=60)
 
 
 def _render_login():
@@ -165,7 +245,7 @@ def _render_login():
     """, unsafe_allow_html=True)
 
     with st.container():
-        # Google Sign-In (top, prominent)
+        # Google Sign-In (popup-based, top)
         _render_google_button()
 
         st.markdown("")  # spacing
@@ -201,7 +281,7 @@ def _render_signup():
     """, unsafe_allow_html=True)
 
     with st.container():
-        # Google Sign-Up (top, prominent)
+        # Google Sign-Up (popup-based, top)
         _render_google_button()
 
         st.markdown("")  # spacing
