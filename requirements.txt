@@ -6,3 +6,4 @@ python-docx
 bcrypt
 supabase
 openai
+Authlib>=1.3.2
