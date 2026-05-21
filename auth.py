@@ -150,8 +150,7 @@ def _render_google_button():
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("🔵 Continue with Google", key="google_login_btn", use_container_width=True):
-        st.login("google")
+    st.button("🔵 Continue with Google", key="google_login_btn", use_container_width=True, on_click=st.login, args=["google"])
 
 
 def _render_login():
