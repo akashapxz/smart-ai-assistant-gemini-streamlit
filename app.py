@@ -13,7 +13,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from database import init_db, create_conversation, save_message, get_conversations, get_messages, delete_conversation, update_conversation_title, get_conversation, get_message_count
-from auth import init_auth_state, check_persistent_session, handle_logout, render_auth_page
+from auth import init_auth_state, check_persistent_session, check_google_oauth, handle_logout, render_auth_page
 from prompts import PROMPTS, DOMAIN_PROMPTS
 from prompting_techniques import TECHNIQUES
 from utils import export_chat, get_word_count, get_session_start, format_timestamp, truncate_text, generate_chat_title
@@ -338,6 +338,9 @@ if api_key:
 # Check persistent session (remember me)
 check_persistent_session()
 
+# Check Google OAuth (st.login bridge)
+check_google_oauth()
+
 # If not authenticated, show auth page
 if not st.session_state.authenticated:
     render_auth_page()
@@ -422,21 +425,8 @@ with st.sidebar:
         # Chat settings
         st.markdown("##### ⚙️ Chat Settings")
 
-        # AI Provider selector
-        provider_options = ["Gemini"]
-        if groq_api_key:
-            provider_options.append("Groq")
-        provider = st.selectbox("🔌 AI Provider", provider_options, key="provider_sel")
-
         personality = st.selectbox("Personality", list(PROMPTS.keys()), key="personality_sel")
         technique = st.selectbox("🧠 Prompting Technique", list(TECHNIQUES.keys()), key="technique_sel")
-
-        # Model options change based on provider
-        if provider == "Groq":
-            model_name = st.selectbox("Model", ["llama-3.3-70b-versatile"], key="groq_model_sel")
-        else:
-            model_name = st.selectbox("Model", ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"], key="model_sel")
-
         temperature = st.slider("Temperature", 0.0, 1.0, 0.7, 0.1, key="temp_slider")
         max_tokens = st.slider("Max Tokens", 256, 4096, 1024, 256, key="token_slider")
 
@@ -510,26 +500,38 @@ def render_chat_page():
             st.session_state.current_conversation_id = None
             st.session_state.messages = []
 
-    # Document upload — compact row near the chat area (like modern LLMs)
-    doc_col1, doc_col2 = st.columns([1, 11])
-    with doc_col1:
-        with st.popover("📎"):
-            uploaded_file = st.file_uploader(
-                "Upload PDF, DOCX, or TXT",
-                type=["pdf", "docx", "txt"],
-                key="doc_upload",
-            )
-            if uploaded_file:
-                if st.session_state.doc_processed_name != uploaded_file.name:
-                    with st.spinner("Reading document..."):
-                        st.session_state.document_text = extract_text(uploaded_file)
-                        st.session_state.doc_processed_name = uploaded_file.name
-                    st.success("✅ Document loaded!")
-                else:
-                    st.success(f"📄 {uploaded_file.name} active")
-    with doc_col2:
-        if st.session_state.document_text:
-            st.caption(f"📄 **{st.session_state.doc_processed_name}** attached  ·  [clear](#)", help="Document is being used as context")
+    # Toolbar row — provider/model selector + document upload (like modern LLMs)
+    tool_col1, tool_col2, tool_col3 = st.columns([3, 3, 6])
+    with tool_col1:
+        provider_options = ["Gemini"]
+        if groq_api_key:
+            provider_options.append("Groq")
+        provider = st.selectbox("Provider", provider_options, key="provider_sel", label_visibility="collapsed")
+    with tool_col2:
+        if provider == "Groq":
+            st.selectbox("Model", ["llama-3.3-70b-versatile"], key="groq_model_sel", label_visibility="collapsed")
+        else:
+            st.selectbox("Model", ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"], key="model_sel", label_visibility="collapsed")
+    with tool_col3:
+        tc1, tc2 = st.columns([1, 11])
+        with tc1:
+            with st.popover("📎"):
+                uploaded_file = st.file_uploader(
+                    "Upload PDF, DOCX, or TXT",
+                    type=["pdf", "docx", "txt"],
+                    key="doc_upload",
+                )
+                if uploaded_file:
+                    if st.session_state.doc_processed_name != uploaded_file.name:
+                        with st.spinner("Reading document..."):
+                            st.session_state.document_text = extract_text(uploaded_file)
+                            st.session_state.doc_processed_name = uploaded_file.name
+                        st.success("✅ Document loaded!")
+                    else:
+                        st.success(f"📄 {uploaded_file.name} active")
+        with tc2:
+            if st.session_state.document_text:
+                st.caption(f"📄 **{st.session_state.doc_processed_name}** attached")
 
     # Display chat history
     for message in st.session_state.messages:

@@ -142,6 +142,52 @@ def get_user_by_id(user_id: int) -> dict | None:
         return None
 
 
+def get_or_create_google_user(email: str, full_name: str, google_id: str = "") -> dict | None:
+    """
+    Find or create a user from Google OAuth.
+    - If a user with this email exists, return them.
+    - Otherwise, create a new user (no password) and return them.
+    """
+    try:
+        supabase = get_supabase_client()
+
+        # Check if user already exists by email
+        result = supabase.table("users").select(
+            "id, username, email, full_name"
+        ).eq("email", email.strip().lower()).execute()
+
+        if result.data:
+            return result.data[0]
+
+        # Create new Google user (username derived from email, no password)
+        username = email.split("@")[0].lower().replace(".", "_")
+
+        # Ensure username is unique by appending random suffix if needed
+        check = supabase.table("users").select("id").eq("username", username).execute()
+        if check.data:
+            username = f"{username}_{secrets.token_hex(3)}"
+
+        result = supabase.table("users").insert({
+            "username": username,
+            "email": email.strip().lower(),
+            "password_hash": "",  # Google users don't have a password
+            "full_name": full_name.strip() if full_name else email.split("@")[0],
+        }).execute()
+
+        if result.data:
+            row = result.data[0]
+            return {
+                "id": row["id"],
+                "username": row["username"],
+                "email": row["email"],
+                "full_name": row["full_name"],
+            }
+        return None
+    except Exception as e:
+        print(f"[DB ERROR] get_or_create_google_user: {e}")
+        return None
+
+
 # ─── Session Token Management (Remember Me) ────────────────────────────────────
 
 def create_session_token(user_id: int, days: int = 30) -> str:
