@@ -13,7 +13,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from database import init_db, create_conversation, save_message, get_conversations, get_messages, delete_conversation, update_conversation_title, get_conversation, get_message_count
-from auth import init_auth_state, check_persistent_session, check_google_credential, handle_logout, render_auth_page
+from auth import init_auth_state, check_persistent_session, check_google_callback, handle_logout, render_auth_page
 from prompts import PROMPTS, DOMAIN_PROMPTS
 from prompting_techniques import TECHNIQUES
 from utils import export_chat, get_word_count, get_session_start, format_timestamp, truncate_text, generate_chat_title
@@ -338,8 +338,8 @@ if api_key:
 # Check persistent session (remember me)
 check_persistent_session()
 
-# Check Google credential (popup-based sign-in)
-check_google_credential()
+# Check Google OAuth callback (code exchange)
+check_google_callback()
 
 # If not authenticated, show auth page
 if not st.session_state.authenticated:

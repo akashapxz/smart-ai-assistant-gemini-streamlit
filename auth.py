@@ -1,12 +1,13 @@
 """
 Authentication module for Smart AI Assistant.
-Handles login, signup, Google Sign-In (popup-based), session management,
+Handles login, signup, Google Sign-In (direct redirect), session management,
 and cookie-based persistent sessions.
 """
 
 import re
+import urllib.parse
 import streamlit as st
-import streamlit.components.v1 as components
+import requests as http_requests
 from database import (
     create_user,
     authenticate_user,
@@ -51,68 +52,102 @@ def check_persistent_session():
     return False
 
 
-def check_google_credential():
-    """Check if a Google credential JWT was passed via query params (from popup sign-in)."""
+def _get_google_config():
+    """Get Google OAuth config from secrets."""
+    try:
+        client_id = st.secrets["auth"]["google"]["client_id"]
+        client_secret = st.secrets["auth"]["google"]["client_secret"]
+        redirect_uri = st.secrets["auth"]["redirect_uri"]
+        return client_id, client_secret, redirect_uri
+    except Exception:
+        return None, None, None
+
+
+def check_google_callback():
+    """Check if Google redirected back with an authorization code."""
     if st.session_state.get("authenticated"):
         return True
 
-    params = st.query_params
-    credential = params.get("google_credential", None)
+    code = st.query_params.get("code", None)
+    if not code:
+        return False
 
-    if credential:
-        # Verify the Google ID token
-        user_info = _verify_google_token(credential)
-        if user_info:
-            email = user_info.get("email", "")
-            name = user_info.get("name", "") or email.split("@")[0]
-
-            user = get_or_create_google_user(email, name)
-            if user:
-                st.session_state.authenticated = True
-                st.session_state.user = user
-                st.session_state.auth_provider = "google"
-                st.query_params.clear()
-                return True
-        # Clear invalid credential
+    client_id, client_secret, redirect_uri = _get_google_config()
+    if not client_id:
         st.query_params.clear()
-    return False
+        return False
 
-
-def _verify_google_token(token: str) -> dict | None:
-    """Verify a Google ID token and return user info."""
     try:
+        # Exchange authorization code for tokens
+        token_response = http_requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            timeout=10,
+        )
+
+        if token_response.status_code != 200:
+            print(f"[AUTH] Token exchange failed: {token_response.text}")
+            st.query_params.clear()
+            return False
+
+        tokens = token_response.json()
+        id_token_str = tokens.get("id_token")
+
+        if not id_token_str:
+            st.query_params.clear()
+            return False
+
+        # Verify the ID token
         from google.oauth2 import id_token
         from google.auth.transport import requests as google_requests
 
-        # Get client_id from secrets
-        client_id = None
-        try:
-            client_id = st.secrets["auth"]["google"]["client_id"]
-        except Exception:
-            try:
-                client_id = st.secrets["auth"]["client_id"]
-            except Exception:
-                pass
-
-        if not client_id:
-            return None
-
         idinfo = id_token.verify_oauth2_token(
-            token, google_requests.Request(), client_id
+            id_token_str, google_requests.Request(), client_id
         )
 
-        # Verify issuer
         if idinfo["iss"] not in ["accounts.google.com", "https://accounts.google.com"]:
-            return None
+            st.query_params.clear()
+            return False
 
-        return {
-            "email": idinfo.get("email", ""),
-            "name": idinfo.get("name", ""),
-            "picture": idinfo.get("picture", ""),
-        }
+        email = idinfo.get("email", "")
+        name = idinfo.get("name", "") or email.split("@")[0]
+
+        # Find or create user in our database
+        user = get_or_create_google_user(email, name)
+        if user:
+            st.session_state.authenticated = True
+            st.session_state.user = user
+            st.session_state.auth_provider = "google"
+            st.query_params.clear()
+            return True
+
     except Exception as e:
-        print(f"[AUTH] Google token verification failed: {e}")
+        print(f"[AUTH] Google callback error: {e}")
+
+    st.query_params.clear()
+    return False
+
+
+def _get_google_login_url():
+    """Build Google OAuth authorization URL."""
+    client_id, _, redirect_uri = _get_google_config()
+    if not client_id:
         return None
+
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "prompt": "select_account",
+    }
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
 
 
 def handle_login(username, password, remember_me):
@@ -177,21 +212,10 @@ def render_auth_page():
         _render_signup()
 
 
-def _get_google_client_id():
-    """Get Google OAuth client ID from secrets."""
-    try:
-        return st.secrets["auth"]["google"]["client_id"]
-    except Exception:
-        try:
-            return st.secrets["auth"]["client_id"]
-        except Exception:
-            return None
-
-
 def _render_google_button():
-    """Render Google Sign-In using Google Identity Services (popup-based, no redirects)."""
-    client_id = _get_google_client_id()
-    if not client_id:
+    """Render a styled 'Continue with Google' link button."""
+    login_url = _get_google_login_url()
+    if not login_url:
         return
 
     st.markdown("""
@@ -202,35 +226,7 @@ def _render_google_button():
     </div>
     """, unsafe_allow_html=True)
 
-    # Google Identity Services popup-based sign-in
-    # After sign-in, navigates to the app with the credential as a query param
-    google_signin_html = f"""
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <script>
-    function handleCredentialResponse(response) {{
-        // Navigate parent page with the credential token
-        var baseUrl = window.parent.location.href.split('?')[0].split('#')[0];
-        window.parent.location.href = baseUrl + '?google_credential=' + encodeURIComponent(response.credential);
-    }}
-    </script>
-    <div id="g_id_onload"
-         data-client_id="{client_id}"
-         data-callback="handleCredentialResponse"
-         data-auto_prompt="false">
-    </div>
-    <div style="display:flex;justify-content:center;padding:8px 0;">
-        <div class="g_id_signin"
-             data-type="standard"
-             data-size="large"
-             data-theme="filled_blue"
-             data-text="continue_with"
-             data-shape="rectangular"
-             data-logo_alignment="left"
-             data-width="350">
-        </div>
-    </div>
-    """
-    components.html(google_signin_html, height=60)
+    st.link_button("🔵 Continue with Google", login_url, use_container_width=True)
 
 
 def _render_login():
@@ -245,7 +241,7 @@ def _render_login():
     """, unsafe_allow_html=True)
 
     with st.container():
-        # Google Sign-In (popup-based, top)
+        # Google Sign-In link
         _render_google_button()
 
         st.markdown("")  # spacing
@@ -281,7 +277,7 @@ def _render_signup():
     """, unsafe_allow_html=True)
 
     with st.container():
-        # Google Sign-Up (popup-based, top)
+        # Google Sign-Up link
         _render_google_button()
 
         st.markdown("")  # spacing
